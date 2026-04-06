@@ -3,7 +3,7 @@
 **Author:** Chris Wirkus  
 **Type:** Undergraduate Research Project  
 
----
+--- 
 
 ## Abstract
 
