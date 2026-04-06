@@ -132,13 +132,13 @@ PAGE = """
     <!-- Addition -->
     <div class="card section">
       <div class="section-title">1 &mdash; Matrix Addition</div>
-      <div class="trace">{{ results.add_trace }}</div>
+      <div class="trace">{{ results.add_trace|safe }}</div>
     </div>
 
     <!-- ReLU -->
     <div class="card section">
       <div class="section-title">3 &mdash; ReLU Activation</div>
-      <div class="trace">{{ results.relu_trace }}</div>
+      <div class="trace">{{ results.relu_trace|safe }}</div>
     </div>
 
   </div>
@@ -146,13 +146,13 @@ PAGE = """
   <!-- Multiplication -->
   <div class="card section">
     <div class="section-title">2 &mdash; Matrix Multiplication (2&times;2 @ 2&times;2)</div>
-    <div class="trace">{{ results.mul_trace }}</div>
+    <div class="trace">{{ results.mul_trace|safe }}</div>
   </div>
 
   <!-- Performance -->
   <div class="card section">
     <div class="section-title">4 &mdash; Performance Comparison</div>
-    <div class="trace">{{ results.perf_trace }}</div>
+    <div class="trace">{{ results.perf_trace|safe }}</div>
   </div>
 
   {% else %}
