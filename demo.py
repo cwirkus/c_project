@@ -1,54 +1,87 @@
 """
-Demo: train a linear model on y = x.
+demo.py — FastMat: C-Based Matrix Computation Backend for Python
 
-Tries to use the compiled C library (model.dll / model.so) first.
-Falls back to a pure-Python implementation if the library isn't built yet.
+Demonstrates matrix addition, multiplication, and ReLU activation.
+
+Uses the compiled C extension (fastmat) if available.
+Falls back to the pure-Python implementation (fastmat_pure) otherwise.
+
+To build the C extension:
+    pip install .
 """
 
-import os, sys
-
-USE_C = os.path.exists("model.dll") or os.path.exists("model.so")
-
-if USE_C:
-    from model import Model
-    print("[Using compiled C library]\n")
-else:
-    print("[C library not built — using pure Python fallback]")
-    print("[Run `python build.py` after installing gcc to use the C version]\n")
-
-    class Model:
-        def __init__(self, learning_rate=0.01):
-            self.weight        = 0.0
-            self.bias          = 0.0
-            self.learning_rate = learning_rate
-
-        def predict(self, x):
-            return x * self.weight + self.bias
-
-        def train(self, inputs, targets, epochs=100):
-            for _ in range(epochs):
-                for x, y in zip(inputs, targets):
-                    error        = y - self.predict(x)
-                    self.weight += self.learning_rate * error * x
-                    self.bias   += self.learning_rate * error
+try:
+    import fastmat
+    print("[Using compiled C extension]\n")
+except ImportError:
+    import fastmat_pure as fastmat
+    print("[C extension not built — using pure Python fallback]")
+    print("[Run `pip install .` to build the C extension]\n")
 
 
-# --- Dataset: y = x ---
-inputs  = [1.0, 2.0, 3.0, 4.0, 5.0]
-targets = [1.0, 2.0, 3.0, 4.0, 5.0]
+def fmt_matrix(flat, rows, cols):
+    """Pretty-print a flat row-major list as a 2-D matrix."""
+    lines = []
+    for i in range(rows):
+        row = [f"{flat[i*cols + j]:6.2f}" for j in range(cols)]
+        lines.append("  [" + "  ".join(row) + "]")
+    return "\n".join(lines)
 
-model = Model(learning_rate=0.01)
 
-print("=== Before training ===")
-for x in inputs:
-    print(f"  predict({x}) = {model.predict(x):.4f}")
+# ── 1. Matrix Addition ─────────────────────────────────────────────────────
+print("=" * 45)
+print("  1. Matrix Addition  (2 × 3)")
+print("=" * 45)
 
-model.train(inputs, targets, epochs=200)
+a = [1.0, 2.0, 3.0,
+     4.0, 5.0, 6.0]
 
-print("\n=== After training (200 epochs) ===")
-for x in inputs:
-    print(f"  predict({x}) = {model.predict(x):.4f}  (expected {x:.1f})")
+b = [7.0, 8.0,  9.0,
+     10.0, 11.0, 12.0]
 
-print("\n=== Generalisation (unseen values) ===")
-for x in [6.0, 10.0, 0.5]:
-    print(f"  predict({x}) = {model.predict(x):.4f}  (expected {x})")
+result = fastmat.add(a, b, 2, 3)
+
+print("A =")
+print(fmt_matrix(a, 2, 3))
+print("B =")
+print(fmt_matrix(b, 2, 3))
+print("A + B =")
+print(fmt_matrix(result, 2, 3))
+print()
+
+# ── 2. Matrix Multiplication ───────────────────────────────────────────────
+print("=" * 45)
+print("  2. Matrix Multiplication  (2×3) @ (3×2)")
+print("=" * 45)
+
+c = [1.0, 2.0, 3.0,
+     4.0, 5.0, 6.0]          # 2×3
+
+d = [7.0,  8.0,
+     9.0,  10.0,
+     11.0, 12.0]              # 3×2
+
+result = fastmat.multiply(c, d, 2, 3, 2)   # → 2×2
+
+print("A (2×3) =")
+print(fmt_matrix(c, 2, 3))
+print("B (3×2) =")
+print(fmt_matrix(d, 3, 2))
+print("A @ B (2×2) =")
+print(fmt_matrix(result, 2, 2))
+print("Expected:")
+print("  [[ 58.00   64.00]")
+print("   [139.00  154.00]]")
+print()
+
+# ── 3. ReLU Activation ────────────────────────────────────────────────────
+print("=" * 45)
+print("  3. ReLU Activation")
+print("=" * 45)
+
+e = [-3.0, -1.0, 0.0, 1.5, 2.0, -0.5, 4.0, -2.2]
+result = fastmat.relu(e)
+
+print(f"Input  = {e}")
+print(f"Output = {result}")
+print("(All negative values clamped to 0.0)")

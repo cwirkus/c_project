@@ -1,0 +1,85 @@
+FastMat: A C-Based Matrix Computation Backend for Python
+=========================================================
+
+WHAT THIS PROJECT IS
+---------------------
+An undergraduate research project that implements core matrix operations in C
+and exposes them to Python as a compiled extension module — the same architecture
+used by NumPy and PyTorch under the hood.
+
+Operations implemented:
+  - Matrix addition        (element-wise, any shape)
+  - Matrix multiplication  (m×k @ k×n → m×n)
+  - ReLU activation        (max(0, x) element-wise)
+
+The project includes a benchmarking script that measures how much faster
+the C implementation is compared to equivalent pure-Python code.
+
+FILES IN THE PROJECT
+---------------------
+  src/fastmat.c      C source — CPython extension module (the core of the project)
+  fastmat_pure.py    Pure-Python version with the exact same API (reference + fallback)
+  setup.py           Build script: `pip install .` compiles fastmat.c into fastmat.pyd/.so
+  benchmark.py       Times Python vs C on 128×128 matrices and prints a speedup table
+  demo.py            Runnable demo showing add, multiply, and relu with printed output
+  app.py             Flask web app for Railway deployment (uses pure Python)
+  requirements.txt   Python dependencies (flask only — no numpy required)
+  Procfile           Tells Railway how to start the web server
+  REPORT.md          Full technical report: design decisions, memory layout, results
+
+HOW THE C CODE WORKS
+---------------------
+Matrices are stored as flat, row-major float arrays in C.
+A 2×2 matrix [[1,2],[3,4]] is stored as [1, 2, 3, 4] in memory.
+
+The matrix multiply loop is ordered i-k-j (not i-j-k) so that the inner
+loop accesses memory sequentially — this is cache-friendlier and faster.
+
+Python passes list objects to C via PyArg_ParseTuple.
+C converts them to float[], runs the computation, then returns a new Python list.
+All malloc'd memory is freed before returning — no leaks across the C-Python boundary.
+
+HOW TO BUILD AND RUN LOCALLY
+------------------------------
+  Step 1 — Build the C extension:
+    pip install .
+
+  Step 2 — Run the demo:
+    python demo.py
+
+  Step 3 — Run the benchmark (requires the built extension):
+    python benchmark.py
+
+  Without building (pure Python fallback):
+    python demo.py          (auto-falls back, shows a warning)
+
+PERFORMANCE (approximate, 128×128 matrices)
+---------------------------------------------
+  Operation   | Python   | C        | Speedup
+  ------------|----------|----------|--------
+  add         | ~8 ms    | ~0.2 ms  | ~40x
+  multiply    | ~3200 ms | ~25 ms   | ~130x
+  relu        | ~4 ms    | ~0.1 ms  | ~40x
+
+  Matrix multiply shows the biggest gain: Python pays interpreter overhead
+  on every one of the 2+ million loop iterations. C runs them natively.
+
+DEPLOYMENT (Railway — for presentation)
+-----------------------------------------
+  GitHub repo:  https://github.com/cwirkus/c_project
+
+  To deploy:
+    1. Go to https://railway.app
+    2. New Project → Deploy from GitHub → select c_project
+    3. Railway auto-detects the Procfile and deploys
+    4. A public URL is generated — open it to see the live demo
+
+  The web app shows matrix operations and a live Python timing measurement.
+  It uses the pure-Python fallback (no C compiler needed on the server).
+
+WHAT THIS DEMONSTRATES
+------------------------
+  - How low-level C code can be called from Python (CPython extension API)
+  - Why NumPy/PyTorch use C/C++ for numerical kernels instead of Python loops
+  - How memory layout (row-major, flat arrays) affects cache performance
+  - Safe memory management across a C-Python boundary (malloc/free + PyObject)
