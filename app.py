@@ -10,7 +10,7 @@ PAGE = """
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FastMat</title>
+<title></title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -227,7 +227,6 @@ PAGE = """
 <body>
 
 <header>
-  <h1>FastMat</h1>
   <p>C-Based Matrix Computation Backend &mdash; see exactly what happens under the hood</p>
 </header>
 

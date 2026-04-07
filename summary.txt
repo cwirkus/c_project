@@ -1,85 +1,328 @@
 FastMat: A C-Based Matrix Computation Backend for Python
 =========================================================
+A Deep-Dive Into How It Works
+=========================================================
 
-WHAT THIS PROJECT IS
----------------------
-An undergraduate research project that implements core matrix operations in C
-and exposes them to Python as a compiled extension module — the same architecture
-used by NumPy and PyTorch under the hood.
 
-Operations implemented:
-  - Matrix addition        (element-wise, any shape)
-  - Matrix multiplication  (m×k @ k×n → m×n)
-  - ReLU activation        (max(0, x) element-wise)
+OVERVIEW
+---------
+FastMat is a project that implements matrix operations (addition, multiplication,
+and ReLU activation) in C, and makes them callable from Python. This is the exact
+same architecture that powers NumPy and PyTorch — those libraries are not written
+in Python, they are written in C/C++ with a Python layer sitting on top.
 
-The project includes a benchmarking script that measures how much faster
-the C implementation is compared to equivalent pure-Python code.
+The goal of this project is to show:
+  1. How those low-level C operations are written
+  2. How Python talks to C code at runtime
+  3. Why C is dramatically faster than Python for this kind of work
 
-FILES IN THE PROJECT
----------------------
-  src/fastmat.c      C source — CPython extension module (the core of the project)
-  fastmat_pure.py    Pure-Python version with the exact same API (reference + fallback)
-  setup.py           Build script: `pip install .` compiles fastmat.c into fastmat.pyd/.so
-  benchmark.py       Times Python vs C on 128×128 matrices and prints a speedup table
-  demo.py            Runnable demo showing add, multiply, and relu with printed output
-  app.py             Flask web app for Railway deployment (uses pure Python)
-  requirements.txt   Python dependencies (flask only — no numpy required)
-  Procfile           Tells Railway how to start the web server
-  REPORT.md          Full technical report: design decisions, memory layout, results
 
-HOW THE C CODE WORKS
----------------------
-Matrices are stored as flat, row-major float arrays in C.
-A 2×2 matrix [[1,2],[3,4]] is stored as [1, 2, 3, 4] in memory.
+==========================================================================
+PART 1 — THE C SIDE  (src/fastmat.c)
+==========================================================================
 
-The matrix multiply loop is ordered i-k-j (not i-j-k) so that the inner
-loop accesses memory sequentially — this is cache-friendlier and faster.
+WHAT IS C AND WHY USE IT?
+--------------------------
+C is a compiled language. When you write C code and build it, the compiler
+translates your code directly into machine instructions — the raw binary that
+your CPU executes. There is no interpreter sitting in between. No type checking
+at runtime. No garbage collector pausing execution. Just instructions running
+on hardware at full speed.
 
-Python passes list objects to C via PyArg_ParseTuple.
-C converts them to float[], runs the computation, then returns a new Python list.
-All malloc'd memory is freed before returning — no leaks across the C-Python boundary.
+Python, by contrast, is interpreted. Every time Python runs a line of code,
+the interpreter has to:
+  - Read the bytecode instruction
+  - Figure out what type each variable is
+  - Unbox the value from a Python object (e.g. extract the float from a PyObject)
+  - Perform the operation
+  - Box the result back into a new Python object
+  - Update reference counts for garbage collection
 
-HOW TO BUILD AND RUN LOCALLY
-------------------------------
-  Step 1 — Build the C extension:
+That overhead happens on EVERY single iteration of EVERY loop. For a 128×128
+matrix multiply, that is over 2 million loop iterations. In C, each of those
+iterations is a handful of CPU instructions. In Python, each one pays the full
+interpreter tax.
+
+
+HOW MEMORY WORKS IN FASTMAT (Flat Row-Major Arrays)
+-----------------------------------------------------
+In C, a matrix is NOT stored as a list of lists. It is stored as a single,
+flat block of memory — a contiguous array of floats. This is called row-major
+order, and it matters for performance.
+
+A 2×3 matrix like this:
+  [[1, 2, 3],
+   [4, 5, 6]]
+
+...is stored in memory as a single sequence:
+  [1, 2, 3, 4, 5, 6]
+
+Why does this matter? Modern CPUs have cache lines — when they read one value
+from memory, they automatically prefetch the surrounding values into fast cache.
+If your data is laid out sequentially, the next value you need is already in
+cache. If your data is scattered (like a Python list of lists), each access
+can cause a cache miss, which stalls the CPU while it waits for memory.
+
+In C:
+  float a[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};  // 2x3 matrix, flat
+
+To access element at row i, column j in a matrix with `cols` columns:
+  a[i * cols + j]
+
+This formula converts a 2D coordinate into a 1D index.
+
+
+THE THREE C KERNELS
+--------------------
+
+  ── Kernel 1: Matrix Addition ──────────────────────────────────────────
+
+  Adding two matrices means adding each pair of elements at the same position.
+  For matrices of any shape (rows × cols), the total number of elements is
+  n = rows × cols. Since the matrices are flat, we just loop over n elements:
+
+    void mat_add(const float *a, const float *b, float *out, int n) {
+        for (int i = 0; i < n; i++)
+            out[i] = a[i] + b[i];
+    }
+
+  - `const float *a` means: a pointer to a block of floats we won't modify
+  - `float *out` means: a pointer to the output block we write results into
+  - The loop runs exactly n times, each iteration doing ONE addition
+  - No overhead, no type checks, no object allocation — just raw addition
+
+
+  ── Kernel 2: Matrix Multiplication ────────────────────────────────────
+
+  Multiplying an (m×k) matrix by a (k×n) matrix produces an (m×n) matrix.
+  Each output element out[i][j] is the dot product of row i from A and
+  column j from B:
+
+    out[i][j] = A[i][0]*B[0][j] + A[i][1]*B[1][j] + ... + A[i][k-1]*B[k-1][j]
+
+  Written in C:
+
+    void mat_mul(const float *a, const float *b, float *out, int m, int k, int n) {
+        memset(out, 0, m * n * sizeof(float));   // zero out the result array
+        for (int i = 0; i < m; i++)
+            for (int p = 0; p < k; p++)
+                for (int j = 0; j < n; j++)
+                    out[i*n + j] += a[i*k + p] * b[p*n + j];
+    }
+
+  Notice the loop order: i → p → j  (not i → j → p)
+
+  This is a deliberate cache optimization. The innermost loop increments j,
+  which means:
+    - out[i*n + j] accesses memory sequentially (j increases by 1 each time)
+    - b[p*n + j]   accesses memory sequentially (j increases by 1 each time)
+  Both are stride-1 memory accesses, which means they hit cache almost every time.
+
+  The naïve i → j → p order would make b[p*n + j] jump around in memory
+  as p changes, causing cache misses and slowing everything down.
+
+
+  ── Kernel 3: ReLU Activation ──────────────────────────────────────────
+
+  ReLU (Rectified Linear Unit) is used in neural networks to introduce
+  non-linearity. Its definition is simply: f(x) = max(0, x).
+  In other words: if a value is negative, set it to zero. If it's positive,
+  leave it alone.
+
+    void mat_relu(float *a, int n) {
+        for (int i = 0; i < n; i++)
+            if (a[i] < 0.0f) a[i] = 0.0f;
+    }
+
+  Why does this matter for ML? Without activation functions like ReLU, a neural
+  network is just a series of matrix multiplications — which collapses into a
+  single linear transformation. ReLU lets the network learn non-linear patterns.
+
+
+MEMORY MANAGEMENT IN C
+------------------------
+C has no garbage collector. You are responsible for allocating and freeing memory.
+
+  float *arr = malloc(n * sizeof(float));   // allocate n floats on the heap
+  // ... use arr ...
+  free(arr);                                // release the memory
+
+If you forget to call free(), the memory is leaked — it stays allocated until
+the program exits. FastMat allocates temporary arrays for input conversion and
+output, and always frees them before returning, even if an error occurs.
+
+
+==========================================================================
+PART 2 — THE PYTHON-C BRIDGE  (CPython Extension API)
+==========================================================================
+
+HOW PYTHON TALKS TO C
+-----------------------
+Python is implemented in C (CPython is the standard Python interpreter).
+This means Python has a built-in mechanism for loading C code directly:
+the CPython Extension API. This is not ctypes (which loads a compiled DLL
+at runtime) — this is compiling C code into a Python module that Python's
+import system treats exactly like a .py file.
+
+When you run:
+  import fastmat
+
+Python looks for a file called fastmat.pyd (Windows) or fastmat.so (Linux/Mac),
+loads it, and calls a special entry point function named PyInit_fastmat().
+That function registers the module and its methods with the Python runtime.
+
+
+THE ENTRY POINT
+----------------
+At the bottom of fastmat.c:
+
+  PyMODINIT_FUNC PyInit_fastmat(void) {
+      return PyModule_Create(&fastmatmodule);
+  }
+
+This is the function Python calls when you `import fastmat`. It creates and
+returns the module object. The module definition lists the three functions:
+
+  static PyMethodDef FastmatMethods[] = {
+      { "add",      py_add,      METH_VARARGS, "..." },
+      { "multiply", py_multiply, METH_VARARGS, "..." },
+      { "relu",     py_relu,     METH_VARARGS, "..." },
+      { NULL, NULL, 0, NULL }   // sentinel: marks end of the list
+  };
+
+
+HOW A PYTHON CALL BECOMES A C CALL
+------------------------------------
+When Python calls fastmat.add([1,2,3], [4,5,6], 1, 3), here is what happens
+step by step:
+
+  Step 1 — Python packages the arguments into a tuple and calls py_add()
+
+  Step 2 — py_add() uses PyArg_ParseTuple to unpack the arguments:
+              "O!O!ii" means: Python list, Python list, int, int
+              PyArg_ParseTuple checks the types and extracts the values.
+              If the types don't match, it sets a Python exception and returns NULL.
+
+  Step 3 — list_to_floats() converts the Python list to a C float array:
+              It calls PyList_GET_ITEM() for each element
+              Then PyFloat_AsDouble() to extract the numeric value
+              Then casts it to float and stores it in a malloc'd array
+
+  Step 4 — The C kernel (mat_add) runs on the raw float arrays.
+              No Python objects. No interpreter. Just memory and arithmetic.
+
+  Step 5 — floats_to_list() converts the result float array back to a Python list:
+              It calls PyList_New(n) to allocate a new list
+              Then PyFloat_FromDouble() for each element to create Python float objects
+              Then PyList_SET_ITEM() to insert them
+
+  Step 6 — All temporary C arrays are freed with free()
+
+  Step 7 — The Python list is returned to the caller
+
+The expensive part is steps 2-3 and 5-6 (conversion). For large matrices,
+the actual computation (step 4) dominates and the overhead is worth it.
+For very small inputs, the conversion cost can actually make the C version
+slower than pure Python.
+
+
+==========================================================================
+PART 3 — THE PYTHON SIDE  (fastmat_pure.py)
+==========================================================================
+
+fastmat_pure.py is a pure-Python implementation of the exact same API.
+It exists for two reasons:
+  1. Fallback: if the C extension hasn't been compiled, the code still runs
+  2. Benchmark baseline: shows exactly what Python is doing so you can compare
+
+  def multiply(a, b, m, k, n):
+      out = [0.0] * (m * n)
+      for i in range(m):
+          for p in range(k):
+              for j in range(n):
+                  out[i*n + j] += a[i*k + p] * b[p*n + j]
+      return out
+
+This is identical logic to the C kernel — same loop order, same index formula.
+The only difference is that every operation here goes through the Python interpreter,
+while the C version runs as native machine code.
+
+
+==========================================================================
+PART 4 — THE BUILD SYSTEM  (setup.py)
+==========================================================================
+
+HOW THE C CODE BECOMES AN IMPORTABLE MODULE
+---------------------------------------------
+Running `pip install .` triggers setup.py, which uses Python's setuptools to:
+
+  1. Find the C source file: src/fastmat.c
+  2. Call the system C compiler (gcc on Linux/Mac, MSVC on Windows)
+  3. Compile fastmat.c into a shared library:
+       - Windows: fastmat.cp312-win_amd64.pyd
+       - Linux:   fastmat.cpython-312-x86_64-linux-gnu.so
+  4. Install it into Python's site-packages directory
+
+After that, `import fastmat` works anywhere in that Python environment.
+
+The -O2 flag tells the compiler to optimize the output:
+  - Inline small functions
+  - Unroll simple loops
+  - Use faster instruction sequences where possible
+  This alone can double the performance of the C kernels.
+
+
+==========================================================================
+PART 5 — WHY THE SPEEDUP IS SO LARGE
+==========================================================================
+
+For a 128×128 matrix multiply, the triple-nested loop runs 128³ = 2,097,152
+iterations. Here is what each iteration costs:
+
+  In Python:
+    - Fetch the loop variable from a dict (locals())
+    - Increment it, check the range condition
+    - Look up the list by name
+    - Call __getitem__ on the list (a method call)
+    - Unbox the Python float object to get the C double
+    - Perform the multiplication
+    - Box the result back into a new Python float object
+    - Update reference counts on created/destroyed objects
+    ~50–100 ns per iteration × 2M iterations = ~100–200 ms
+
+  In C:
+    - Load a float from memory (or cache)
+    - Multiply two floats
+    - Add to accumulator
+    - Increment loop counter
+    ~1–2 ns per iteration × 2M iterations = ~2–4 ms
+
+  Result: 30–100× speedup depending on hardware and matrix size.
+
+This is not a trick or a special algorithm. It is the same logic. The difference
+is purely the cost of the Python interpreter vs native CPU instructions.
+
+
+==========================================================================
+PART 6 — HOW TO RUN IT
+==========================================================================
+
+  Build the C extension (requires a C compiler):
     pip install .
 
-  Step 2 — Run the demo:
+  Run the interactive demo:
     python demo.py
 
-  Step 3 — Run the benchmark (requires the built extension):
+  Run the benchmark (Python vs C timings):
     python benchmark.py
 
-  Without building (pure Python fallback):
-    python demo.py          (auto-falls back, shows a warning)
+  Run the web UI locally:
+    python app.py
+    Open: http://localhost:5000
 
-PERFORMANCE (approximate, 128×128 matrices)
----------------------------------------------
-  Operation   | Python   | C        | Speedup
-  ------------|----------|----------|--------
-  add         | ~8 ms    | ~0.2 ms  | ~40x
-  multiply    | ~3200 ms | ~25 ms   | ~130x
-  relu        | ~4 ms    | ~0.1 ms  | ~40x
+  Without building (uses pure Python automatically):
+    python demo.py        ← falls back, shows a warning
 
-  Matrix multiply shows the biggest gain: Python pays interpreter overhead
-  on every one of the 2+ million loop iterations. C runs them natively.
-
-DEPLOYMENT (Railway — for presentation)
------------------------------------------
-  GitHub repo:  https://github.com/cwirkus/c_project
-
-  To deploy:
-    1. Go to https://railway.app
-    2. New Project → Deploy from GitHub → select c_project
-    3. Railway auto-detects the Procfile and deploys
-    4. A public URL is generated — open it to see the live demo
-
-  The web app shows matrix operations and a live Python timing measurement.
-  It uses the pure-Python fallback (no C compiler needed on the server).
-
-WHAT THIS DEMONSTRATES
-------------------------
-  - How low-level C code can be called from Python (CPython extension API)
-  - Why NumPy/PyTorch use C/C++ for numerical kernels instead of Python loops
-  - How memory layout (row-major, flat arrays) affects cache performance
-  - Safe memory management across a C-Python boundary (malloc/free + PyObject)
+  Deploy to web (Railway or Render):
+    Push to GitHub, connect repo — Procfile handles the rest.
+    The web app uses pure Python (no compiler needed on the server).
